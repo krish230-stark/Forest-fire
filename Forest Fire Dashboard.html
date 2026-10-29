@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Forest Fire Dashboard</title>
+<style>
+:root{--bg:#f6f5f1;--card:#fff;--tx:#1d1d1b;--mut:#6b6a64;--bd:#dedcd4;--ac:#d9480f;--ac2:#fff1e8;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161614;--card:#21211e;--tx:#ecebe6;--mut:#a09f97;--bd:#37362f;--ac:#ff7a3d;--ac2:#3a2519;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#161614;--card:#21211e;--tx:#ecebe6;--mut:#a09f97;--bd:#37362f;--ac:#ff7a3d;--ac2:#3a2519;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:14px}
+h1{font-size:1.25rem;margin:0}.sub{color:var(--mut);font-size:.85rem;margin:2px 0 12px}
+h2{font-size:.95rem;margin:0 0 8px}
+.wrap{display:grid;grid-template-columns:290px 1fr;gap:14px;align-items:start}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px}
+.maps{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+canvas{width:100%;aspect-ratio:1;border-radius:8px;display:block;background:#222;cursor:crosshair}
+.row{margin-bottom:9px}.row label{display:flex;justify-content:space-between;font-size:.82rem;color:var(--mut)}
+.row b{color:var(--tx);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--ac)}
+button{font:inherit;font-size:.8rem;background:var(--card);color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:5px 10px;cursor:pointer}
+button.on,button:hover{background:var(--ac2);border-color:var(--ac)}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.note{font-size:.78rem;color:var(--mut);margin-top:6px}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th,td{text-align:right;padding:4px 8px;border-bottom:1px solid var(--bd)}th:first-child,td:first-child{text-align:left}
+.tw{overflow-x:auto}
+@media (max-width:1050px){.maps{grid-template-columns:1fr}}
+@media (max-width:860px){.wrap{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>🔥 Forest Fire Dashboard</h1>
+<div class="sub">Inputs badlo → next-day fire risk map aur 1/2/3/6/12 ghante ki spread simulation ek saath update hoti hai.</div>
+<div class="wrap">
+  <div class="card">
+    <h2>Inputs</h2>
+    <div class="btns" id="presets"></div>
+    <div id="ctl"></div>
+    <div class="row"><label><span>Terrain seed</span><b id="sv">7</b></label>
+      <div class="btns"><button id="newT">New terrain</button><button id="auto">Auto ignition</button></div></div>
+    <div class="note">Ignition point: kisi bhi map par click karo. Default = sabse high-risk pixel. Cell = 50 m, step = 10 min.</div>
+  </div>
+  <div>
+    <div class="maps">
+      <div class="card"><h2>a) Next-day fire risk</h2><canvas id="cr" width="500" height="500"></canvas><div class="note" id="rs"></div></div>
+      <div class="card"><h2>b) Fire spread simulation</h2><canvas id="cs" width="500" height="500"></canvas>
+        <div class="btns"><button id="play">▶ Play</button><span id="tl" style="align-self:center;font-size:.85rem"></span></div>
+        <input type="range" id="ts" min="0" max="72" value="0">
+        <div class="btns" id="snaps"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>Affected area at each time</h2><div class="tw"><table id="st"></table></div>
+      <div class="note">Red = burning, dark = burnt, blue = non-burnable, ★ = ignition. Risk model aur terrain demo-level hain (synthetic), real data ke liye DEM/ERA5 plug karna hoga.</div></div>
+  </div>
+</div>
+<script>
+const N=100,CELL=50,HA=CELL*CELL/1e4,STEPS=72,BURN=3,FF=[0,1.2,1,.8];
+const NB=[[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+const DEF=[["temp","Temperature (°C)",5,45,1,32],["rh","Relative humidity (%)",10,100,1,30],["wind","Wind speed (m/s)",0,20,.5,6],["wdir","Wind from (°; 0=N, 90=E, 225=SW)",0,359,5,225],["rain","Rain (mm)",0,20,.5,0],["dry","Days since last rain",0,15,1,10],["pb","Spread rate (P_BASE)",.1,.8,.05,.35]];
+const PRE={"Hot & windy":[38,18,10,225,0,15,.35],"Normal day":[30,40,4,225,0,5,.35],"After rain":[22,75,3,225,12,0,.35]};
+const P={};let seed=7,dem,fuel,slope,shade,R,Rmax,ig=null,manual=false,frames=[],PF,playing=false,timer=null;
+function rng(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function norm(a){let mn=1e9,mx=-1e9;for(const v of a){if(v<mn)mn=v;if(v>mx)mx=v}return a.map(v=>(v-mn)/(mx-mn||1))}
+function smooth(rd,r,p){let a=new Float32Array(N*N).map(()=>rd()-.5),b=new Float32Array(N*N);const c=v=>Math.min(N-1,Math.max(0,v));
+ for(let k=0;k<p;k++){for(let y=0;y<N;y++)for(let x=0;x<N;x++){let s=0;for(let d=-r;d<=r;d++)s+=a[y*N+c(x+d)];b[y*N+x]=s/(2*r+1)}
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){let s=0;for(let d=-r;d<=r;d++)s+=b[c(y+d)*N+x];a[y*N+x]=s/(2*r+1)}}
+ return norm(a)}
+function terrain(){const rd=rng(seed);dem=smooth(rd,8,3).map(v=>v*900+300);
+ const veg=smooth(rd,5,3);fuel=new Uint8Array(N*N).map((_,i)=>veg[i]<.1?0:veg[i]<.4?1:veg[i]<.7?2:3);
+ slope=new Float32Array(N*N);shade=new Float32Array(N*N);const g=(y,x)=>dem[Math.min(N-1,Math.max(0,y))*N+Math.min(N-1,Math.max(0,x))];
+ for(let y=0;y<N;y++)for(let x=0;x<N;x++){const gx=(g(y,x+1)-g(y,x-1))/(2*CELL),gy=(g(y+1,x)-g(y-1,x))/(2*CELL),i=y*N+x;
+  slope[i]=Math.atan(Math.hypot(gx,gy))*180/Math.PI;shade[i]=Math.min(1,Math.max(.3,.68-2.2*(gx+gy)))}}
+function risk(){R=new Float32Array(N*N);Rmax=0;let best=-1;
+ for(let i=0;i<N*N;i++){if(!fuel[i]){R[i]=-1;continue}
+  const t=P.temp-6.5*(dem[i]-600)/1000;
+  const z=-9+1.4*(t-25)/6-1.4*(P.rh-45)/18+.6*(P.wind-3)/1.5+.18*P.dry+1.5*(FF[fuel[i]]-1)+.06*slope[i]-(P.rain>1?3:0);
+  R[i]=1/(1+Math.exp(-z));if(R[i]>Rmax){Rmax=R[i];best=i}}
+ if(!manual||ig===null||!fuel[ig])ig=best}
+function buildPF(){const wt=((P.wdir+180)%360)*Math.PI/180,wx=Math.sin(wt),wy=Math.cos(wt);
+ const fm=Math.min(1.2,Math.max(.1,1.3-P.rh/60))*Math.exp(-P.rain)*(1+(P.temp-25)/100)*(.75+.25*P.dry/15);
+ PF=NB.map(([dy,dx])=>{const a=new Float32Array(N*N),dist=CELL*Math.hypot(dy,dx),ce=(-dx*wx+dy*wy)/Math.hypot(dx,dy);
+  const fw=Math.exp(.045*P.wind)*Math.exp(P.wind*.131*(ce-1));
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){const sy=y+dy,sx=x+dx,i=y*N+x;if(sy<0||sy>=N||sx<0||sx>=N||!fuel[i])continue;
+   const sl=Math.atan((dem[i]-dem[sy*N+sx])/dist)*180/Math.PI;
+   a[i]=Math.min(1,P.pb*FF[fuel[i]]*fm*fw*Math.exp(.078*sl)/(dx&&dy?1.414:1))}return a})}
+function simulate(){buildPF();const rd=rng(1234);let st=new Uint8Array(N*N),bt=new Uint8Array(N*N);
+ for(let i=0;i<N*N;i++)if(!fuel[i])st[i]=3;
+ const iy=ig/N|0,ix=ig%N;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const y=iy+dy,x=ix+dx;if(y>=0&&y<N&&x>=0&&x<N&&fuel[y*N+x])st[y*N+x]=1}
+ frames=[st.slice()];
+ for(let t=1;t<=STEPS;t++){const ns=st.slice();
+  for(let y=0;y<N;y++)for(let x=0;x<N;x++){const i=y*N+x;
+   if(st[i]===1){bt[i]++;if(bt[i]>=BURN)ns[i]=2}
+   else if(st[i]===0){let q=1;for(let k=0;k<8;k++){const sy=y+NB[k][0],sx=x+NB[k][1];if(sy>=0&&sy<N&&sx>=0&&sx<N&&st[sy*N+sx]===1)q*=1-PF[k][i]}
+    if(q<1&&rd()>q)ns[i]=1}}
+  st=ns;frames.push(st.slice())}}
+const FC=[[74,144,217],[232,215,122],[155,184,91],[45,106,58]];
+const oc=document.createElement("canvas");oc.width=oc.height=N;const octx=oc.getContext("2d"),img=octx.createImageData(N,N);
+function paint(cv,fn){for(let i=0;i<N*N;i++){const f=FC[fuel[i]],s=shade[i]*(fuel[i]?1:.9);let c=[f[0]*s,f[1]*s,f[2]*s];c=fn(i,c);const o=i*4;img.data[o]=c[0];img.data[o+1]=c[1];img.data[o+2]=c[2];img.data[o+3]=255}
+ octx.putImageData(img,0,0);const x=cv.getContext("2d");x.imageSmoothingEnabled=false;x.drawImage(oc,0,0,cv.width,cv.height)}
+function marks(cv,arrow){const x=cv.getContext("2d"),W=cv.width,px=((ig%N)+.5)*W/N,py=((ig/N|0)+.5)*W/N;
+ x.font="22px sans-serif";x.textAlign="center";x.textBaseline="middle";x.lineWidth=3;x.strokeStyle="#000";x.strokeText("★",px,py);x.fillStyle="#ffd43b";x.fillText("★",px,py);
+ if(arrow){const wt=((P.wdir+180)%360)*Math.PI/180,dx=Math.sin(wt)*34,dy=-Math.cos(wt)*34,ox=50,oy=50;x.strokeStyle="#fff";x.fillStyle="#fff";x.lineWidth=3;
+  x.beginPath();x.moveTo(ox,oy);x.lineTo(ox+dx,oy+dy);x.stroke();const a=Math.atan2(dy,dx);x.beginPath();x.moveTo(ox+dx,oy+dy);
+  x.lineTo(ox+dx-9*Math.cos(a-.5),oy+dy-9*Math.sin(a-.5));x.lineTo(ox+dx-9*Math.cos(a+.5),oy+dy-9*Math.sin(a+.5));x.fill();
+  x.font="12px sans-serif";x.lineWidth=2;x.strokeStyle="#000";x.strokeText("wind",ox,oy+26);x.fillText("wind",ox,oy+26)}}
+const cr=document.getElementById("cr"),cs=document.getElementById("cs"),ts=document.getElementById("ts");
+function drawRisk(){paint(cr,(i,c)=>{if(R[i]<0)return c;const v=Math.min(1,R[i]/(Rmax||1)),a=.12+.8*v,h=[255,230-150*v,80-80*v];
+  return[c[0]*(1-a)+h[0]*a,c[1]*(1-a)+h[1]*a,c[2]*(1-a)+h[2]*a]});marks(cr,true);
+ let s=0,n=0,hi=0;for(let i=0;i<N*N;i++)if(R[i]>=0){s+=R[i];n++;if(R[i]>=Rmax*.5)hi++}
+ document.getElementById("rs").textContent=`Max risk ${(Rmax*100).toFixed(1)}% · mean ${(s/n*100).toFixed(1)}% · high-risk zone (≥ half of max) ${(hi*HA).toFixed(0)} ha`}
+function drawSim(){const t=+ts.value,st=frames[t];paint(cs,(i,c)=>st[i]===1?[255,70,0]:st[i]===2?[c[0]*.2+18,c[1]*.2+18,c[2]*.2+18]:c);marks(cs,true);
+ document.getElementById("tl").textContent=`t = ${(t/6).toFixed(1)} h`}
+function table(){const H=[1,2,3,6,12];let h="<tr><th>Time</th><th>Burning (ha)</th><th>Burnt (ha)</th><th>Total (ha)</th></tr>";
+ for(const k of H){const f=frames[k*6];let b=0,d=0;for(const v of f){if(v===1)b++;else if(v===2)d++}h+=`<tr><td>${k} h</td><td>${(b*HA).toFixed(1)}</td><td>${(d*HA).toFixed(1)}</td><td>${((b+d)*HA).toFixed(1)}</td></tr>`}
+ document.getElementById("st").innerHTML=h}
+function update(){risk();simulate();drawRisk();drawSim();table()}
+let pend=0;function later(){clearTimeout(pend);pend=setTimeout(update,50)}
+const ctl=document.getElementById("ctl");
+for(const[id,lb,mn,mx,sp,v]of DEF){P[id]=v;const d=document.createElement("div");d.className="row";
+ d.innerHTML=`<label><span>${lb}</span><b id="v_${id}">${v}</b></label><input type="range" id="i_${id}" min="${mn}" max="${mx}" step="${sp}" value="${v}">`;ctl.appendChild(d);
+ d.querySelector("input").oninput=e=>{P[id]=+e.target.value;document.getElementById("v_"+id).textContent=e.target.value;later()}}
+for(const nm in PRE){const b=document.createElement("button");b.textContent=nm;b.onclick=()=>{DEF.forEach(([id],k)=>{P[id]=PRE[nm][k];document.getElementById("i_"+id).value=P[id];document.getElementById("v_"+id).textContent=P[id]});manual=false;update()};document.getElementById("presets").appendChild(b)}
+for(const k of[1,2,3,6,12]){const b=document.createElement("button");b.textContent=k+" h";b.onclick=()=>{stop();ts.value=k*6;drawSim()};document.getElementById("snaps").appendChild(b)}
+ts.oninput=()=>{stop();drawSim()};
+function stop(){playing=false;clearInterval(timer);document.getElementById("play").textContent="▶ Play"}
+document.getElementById("play").onclick=()=>{if(playing){stop();return}playing=true;document.getElementById("play").textContent="⏸ Pause";if(+ts.value>=STEPS)ts.value=0;
+ timer=setInterval(()=>{if(+ts.value>=STEPS){stop();return}ts.value=+ts.value+1;drawSim()},110)};
+document.getElementById("newT").onclick=()=>{seed=(seed*7+3)%1000;document.getElementById("sv").textContent=seed;manual=false;terrain();update()};
+document.getElementById("auto").onclick=()=>{manual=false;update()};
+for(const cv of[cr,cs])cv.onclick=e=>{const r=cv.getBoundingClientRect(),x=Math.min(N-1,(e.clientX-r.left)/r.width*N|0),y=Math.min(N-1,(e.clientY-r.top)/r.height*N|0),i=y*N+x;
+ if(fuel[i]){ig=i;manual=true;update()}};
+terrain();update();
+</script>
+</body>
+</html>
